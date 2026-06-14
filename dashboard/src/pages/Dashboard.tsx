@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
-import { Shield, LogOut, Play, Square, Activity, Target, Database, Ban, Scale, Wifi, WifiOff, Zap, ShieldAlert, Bug, Users, TrendingUp } from "lucide-react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
+import { Shield, LogOut, Play, Square, Activity, Target, Database, Ban, Scale, Wifi, WifiOff, Zap, ShieldAlert, Bug, Users, TrendingUp, Bell, Clock, MapPin, ListOrdered } from "lucide-react";
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell, Legend } from "recharts";
 import { motion, AnimatePresence } from "framer-motion";
 
 type RequestType = "ALLOW" | "BLOCK" | "HONEY" | "CAPTCHA";
@@ -14,6 +14,26 @@ interface LiveRequest {
   train_id: string;
   route: string;
   score: number;
+  flags?: string[];
+  queue_position?: number | null;
+  estimated_wait?: string | null;
+  priority_score?: number | null;
+}
+
+interface AlertStatus {
+  alert_active: boolean;
+  blocked_bots: number;
+  requests_per_sec: number;
+  affected_route: string;
+  top_ip: string;
+}
+
+interface Analytics {
+  peak_attack_hour: number | null;
+  peak_attack_count: number;
+  top_attacking_ips: { ip: string; count: number }[];
+  top_targeted_routes: { route: string; count: number }[];
+  hourly_attacks: number[];
 }
 
 interface HoneypotEntry {
@@ -26,13 +46,13 @@ interface HoneypotEntry {
 import IndiaMap, { MapDot } from "@/components/IndiaMap";
 
 const CITY_COORDS: Record<string, [number, number]> = {
-  "MUMBAI":    [19.076, 72.877],
-  "DELHI":     [28.613, 77.209],
-  "PUNE":      [18.520, 73.856],
-  "JAIPUR":    [26.912, 75.787],
+  "MUMBAI": [19.076, 72.877],
+  "DELHI": [28.613, 77.209],
+  "PUNE": [18.520, 73.856],
+  "JAIPUR": [26.912, 75.787],
   "AHMEDABAD": [23.022, 72.571],
-  "CHENNAI":   [13.082, 80.270],
-  "KOLKATA":   [22.572, 88.363],
+  "CHENNAI": [13.082, 80.270],
+  "KOLKATA": [22.572, 88.363],
   "HYDERABAD": [17.385, 78.486]
 };
 
@@ -52,21 +72,24 @@ export default function Dashboard() {
 
   const [isRunning, setIsRunning] = useState(false);
   const [rps, setRps] = useState(10);
-  
+
   const [stats, setStats] = useState({ total: 0, blocked: 0, passed: 0, honey: 0, captcha: 0 });
   const [requests, setRequests] = useState<LiveRequest[]>([]);
   const [mapDots, setMapDots] = useState<MapDot[]>([]);
-  const [activeTab, setActiveTab] = useState<'feed' | 'map' | 'analytics'>('feed');
-  const [topIps, setTopIps] = useState<{ ip: string; count: number; region: string }[]>([]);
-  const [blacklist, setBlacklist] = useState<{ip: string, count: number, last_seen: string}[]>([]);
+  const [activeTab, setActiveTab] = useState<'feed' | 'map' | 'analytics' | 'admin'>('feed');
+  // topIps derived from analytics — no separate state needed
+  const [blacklist, setBlacklist] = useState<{ ip: string, count: number, last_seen: string }[]>([]);
   const [honeypotLog, setHoneypotLog] = useState<HoneypotEntry[]>([]);
   const pendingHoneypotsRef = useRef<{ userId: string; countdown: number; train_id: string; route: string; timestamp: string }[]>([]);
-  const [timeSeriesData, setTimeSeriesData] = useState<{time: string; bots: number; genuine: number}[]>([]);
+  const [timeSeriesData, setTimeSeriesData] = useState<{ time: string; bots: number; genuine: number; rate?: number }[]>([]);
   const [heatmapData, setHeatmapData] = useState<number[]>(Array(60).fill(0));
   const heatmapRef = useRef<number[]>(Array(60).fill(0));
   const currentSecondCounts = useRef({ bots: 0, genuine: 0 });
   const [dataSource, setDataSource] = useState<'ws' | 'mock' | null>(null);
   const [isDark, setIsDark] = useState(true);
+  const [alert, setAlert] = useState<AlertStatus | null>(null);
+  const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [queueEntries, setQueueEntries] = useState<{ user_id: string; queue_position: number; estimated_wait: string; priority_score: number }[]>([]);
 
   useEffect(() => {
     const tatkalUser = localStorage.getItem("tatkal_user");
@@ -204,14 +227,26 @@ export default function Dashboard() {
     else if (score >= 70) type = "BLOCK";
     else if (score >= 50) type = "CAPTCHA";
 
+    const userId = `USR_${Math.floor(Math.random() * 9000) + 1000}`;
+    // For ALLOW events, generate realistic queue slot info
+    const priorityScore = type === 'ALLOW' ? Math.max(0, 100 - score) : undefined;
+    const queuePosition = type === 'ALLOW' ? Math.floor(Math.random() * 15) + 1 : undefined;
+    const waitSecs = queuePosition != null ? Math.max(0, (queuePosition - 1) / 2) : undefined;
+    const estimatedWait = waitSecs != null
+      ? (waitSecs < 60 ? `~${Math.round(waitSecs)}s` : `~${Math.floor(waitSecs / 60)}m ${Math.round(waitSecs % 60)}s`)
+      : undefined;
+
     const newReq: LiveRequest = {
       id: Math.random().toString(36).substring(2, 9),
       timestamp: new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 }),
       type,
-      user_id: `USR_${Math.floor(Math.random() * 9000) + 1000}`,
+      user_id: userId,
       train_id: ["12903_GOLD", "12904_EXP", "22691_RAJD", "12431_TRV"][Math.floor(Math.random() * 4)],
       route: ["NDLS-BCT", "BCT-NDLS", "SBC-NZM", "HWH-MAS"][Math.floor(Math.random() * 4)],
-      score
+      score,
+      queue_position: queuePosition ?? null,
+      priority_score: priorityScore ?? null,
+      estimated_wait: estimatedWait ?? null,
     };
 
     handleEvent(newReq);
@@ -358,16 +393,71 @@ export default function Dashboard() {
     }
   };
 
+  // Auto-start simulation + sync status on mount
   useEffect(() => {
     fetch('http://localhost:8001/simulate/status')
       .then(res => res.json())
       .then(data => {
         if (data && typeof data.running === 'boolean') {
           setIsRunning(data.running);
+          // Auto-start if not already running
+          if (!data.running) {
+            fetch(`http://localhost:8001/simulate/start?rps=${rps}`, { method: 'POST' })
+              .then(() => setIsRunning(true))
+              .catch(() => { });
+          }
         }
       })
-      .catch(err => console.warn('Simulator offline or unreachable:', err));
+      .catch(() => { });
   }, []);
+
+  // Poll /alert/status and /analytics every 3 seconds
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const [alertRes, analyticsRes, queueRes] = await Promise.all([
+          fetch('http://localhost:8000/alert/status'),
+          fetch('http://localhost:8000/analytics'),
+          fetch('http://localhost:8000/queue/stats'),
+        ]);
+        if (alertRes.ok) setAlert(await alertRes.json());
+        if (analyticsRes.ok) setAnalytics(await analyticsRes.json());
+        if (queueRes.ok) {
+          const q = await queueRes.json();
+          setQueueEntries(q.entries || []);
+        }
+      } catch { /* orchestrator offline */ }
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Live queue update: when an ALLOW event arrives with queue info, merge it in
+  // This gives real-time queue updates between the 3-second poll intervals
+  useEffect(() => {
+    const lastReq = requests[0];
+    if (
+      lastReq?.type === 'ALLOW' &&
+      lastReq.queue_position != null &&
+      lastReq.priority_score != null &&
+      lastReq.estimated_wait != null
+    ) {
+      setQueueEntries(prev => {
+        const filtered = prev.filter(e => e.user_id !== lastReq.user_id);
+        const newEntry = {
+          user_id: lastReq.user_id,
+          queue_position: lastReq.queue_position!,
+          priority_score: lastReq.priority_score!,
+          estimated_wait: lastReq.estimated_wait!,
+        };
+        return [newEntry, ...filtered]
+          .sort((a, b) => a.queue_position - b.queue_position)
+          .slice(0, 20);
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requests]);
 
   const handleThemeToggle = () => {
     const next = !isDark;
@@ -390,6 +480,7 @@ export default function Dashboard() {
 
   // Computed helpers
   const blockRate = stats.total > 0 ? ((stats.blocked + stats.honey) / stats.total * 100).toFixed(1) : '0.0';
+  const topIps: { ip: string; count: number; region: string }[] = (analytics?.top_attacking_ips ?? []).map(entry => ({ ip: entry.ip, count: entry.count, region: 'India' }));
 
   return (
     <div className="h-screen w-full bg-background flex flex-col font-sans overflow-hidden">
@@ -406,13 +497,12 @@ export default function Dashboard() {
         </div>
         <div className="flex items-center gap-3">
           {/* Data source indicator */}
-          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[0.65rem] font-semibold border transition-colors ${
-            dataSource === 'ws'
+          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[0.65rem] font-semibold border transition-colors ${dataSource === 'ws'
               ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
               : dataSource === 'mock'
-              ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-              : 'bg-card text-muted-foreground border-border'
-          }`}>
+                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                : 'bg-card text-muted-foreground border-border'
+            }`}>
             {dataSource === 'ws' ? <Wifi className="w-3 h-3" /> : dataSource === 'mock' ? <Zap className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
             {dataSource === 'ws' ? 'LIVE' : dataSource === 'mock' ? 'SIMULATED' : 'IDLE'}
           </div>
@@ -441,7 +531,7 @@ export default function Dashboard() {
               </svg>
             )}
           </button>
-          <button 
+          <button
             onClick={handleLogout}
             className="ml-1 p-2 border border-border rounded-lg text-muted-foreground hover:border-red-500/50 hover:text-red-400 hover:bg-red-500/5 transition-all"
             title="Sign out"
@@ -463,10 +553,10 @@ export default function Dashboard() {
               { label: 'Honeypot Caught', value: stats.honey, color: 'yellow', icon: Bug, sub: `${honeypotLog.length} logged` },
             ].map((card) => {
               const colorMap: Record<string, { text: string; bg: string; glow: string }> = {
-                blue:   { text: 'text-blue-400',   bg: 'bg-blue-500/10',   glow: 'shadow-[inset_0_1px_0_rgba(96,165,250,0.1)]' },
-                red:    { text: 'text-red-400',     bg: 'bg-red-500/10',    glow: 'shadow-[inset_0_1px_0_rgba(248,113,113,0.1)]' },
-                green:  { text: 'text-green-400',   bg: 'bg-green-500/10',  glow: 'shadow-[inset_0_1px_0_rgba(74,222,128,0.1)]' },
-                yellow: { text: 'text-yellow-400',  bg: 'bg-yellow-500/10', glow: 'shadow-[inset_0_1px_0_rgba(250,204,21,0.1)]' },
+                blue: { text: 'text-blue-400', bg: 'bg-blue-500/10', glow: 'shadow-[inset_0_1px_0_rgba(96,165,250,0.1)]' },
+                red: { text: 'text-red-400', bg: 'bg-red-500/10', glow: 'shadow-[inset_0_1px_0_rgba(248,113,113,0.1)]' },
+                green: { text: 'text-green-400', bg: 'bg-green-500/10', glow: 'shadow-[inset_0_1px_0_rgba(74,222,128,0.1)]' },
+                yellow: { text: 'text-yellow-400', bg: 'bg-yellow-500/10', glow: 'shadow-[inset_0_1px_0_rgba(250,204,21,0.1)]' },
               };
               const c = colorMap[card.color];
               const textColor = card.color === 'blue' ? 'text-foreground' : c.text.replace('400', '500');
@@ -492,16 +582,16 @@ export default function Dashboard() {
             {[
               { id: 'feed', label: 'Live Feed' },
               { id: 'map', label: 'Attack Map' },
-              { id: 'analytics', label: 'Analytics' }
+              { id: 'analytics', label: 'Analytics' },
+              { id: 'admin', label: '🛡 Admin' },
             ].map(tab => (
               <button
                 key={tab.id}
-                onClick={() => setActiveTab(tab.id as 'feed' | 'map' | 'analytics')}
-                className={`py-2 text-[0.8rem] font-semibold tracking-wider transition-all duration-200 border-b-2 -mb-[2px] ${
-                  activeTab === tab.id
+                onClick={() => setActiveTab(tab.id as 'feed' | 'map' | 'analytics' | 'admin')}
+                className={`py-2 text-[0.8rem] font-semibold tracking-wider transition-all duration-200 border-b-2 -mb-[2px] ${activeTab === tab.id
                     ? 'border-blue-500 text-white font-bold'
                     : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
+                  }`}
               >
                 {tab.label}
               </button>
@@ -543,20 +633,18 @@ export default function Dashboard() {
                         initial={{ opacity: 0, x: -12, scale: 0.98 }}
                         animate={{ opacity: 1, x: 0, scale: 1 }}
                         transition={{ duration: 0.18, ease: 'easeOut' }}
-                        className={`flex items-center gap-3 px-2 py-1.5 rounded-lg border transition-colors ${
-                          req.type === 'ALLOW'    ? 'bg-green-500/[0.04] border-green-500/10 hover:bg-green-500/[0.08]' :
-                          req.type === 'BLOCK'    ? 'bg-red-500/[0.04] border-red-500/10 hover:bg-red-500/[0.08]' :
-                          req.type === 'CAPTCHA'  ? 'bg-blue-500/[0.04] border-blue-500/10 hover:bg-blue-500/[0.08]' :
-                          'bg-yellow-500/[0.04] border-yellow-500/10 hover:bg-yellow-500/[0.08]'
-                        }`}
+                        className={`flex items-center gap-3 px-2 py-1.5 rounded-lg border transition-colors ${req.type === 'ALLOW' ? 'bg-green-500/[0.04] border-green-500/10 hover:bg-green-500/[0.08]' :
+                            req.type === 'BLOCK' ? 'bg-red-500/[0.04] border-red-500/10 hover:bg-red-500/[0.08]' :
+                              req.type === 'CAPTCHA' ? 'bg-blue-500/[0.04] border-blue-500/10 hover:bg-blue-500/[0.08]' :
+                                'bg-yellow-500/[0.04] border-yellow-500/10 hover:bg-yellow-500/[0.08]'
+                          }`}
                       >
                         <span className="text-muted-foreground/70 w-20 shrink-0 text-[0.7rem]">{req.timestamp}</span>
-                        <span className={`px-1.5 py-0.5 rounded-md text-[0.6rem] font-bold w-14 text-center shrink-0 ${
-                          req.type === 'ALLOW'   ? 'bg-green-500/20 text-green-400' :
-                          req.type === 'BLOCK'   ? 'bg-red-500/20 text-red-400' :
-                          req.type === 'CAPTCHA' ? 'bg-blue-500/20 text-blue-400' :
-                          'bg-yellow-500/20 text-yellow-400'
-                        }`}>
+                        <span className={`px-1.5 py-0.5 rounded-md text-[0.6rem] font-bold w-14 text-center shrink-0 ${req.type === 'ALLOW' ? 'bg-green-500/20 text-green-400' :
+                            req.type === 'BLOCK' ? 'bg-red-500/20 text-red-400' :
+                              req.type === 'CAPTCHA' ? 'bg-blue-500/20 text-blue-400' :
+                                'bg-yellow-500/20 text-yellow-400'
+                          }`}>
                           {req.type}
                         </span>
                         <span className="text-foreground/90 w-16 text-[0.7rem]">{req.user_id}</span>
@@ -595,10 +683,10 @@ export default function Dashboard() {
                     const pct = val / max;
                     const bg =
                       pct === 0 ? 'bg-border/40'
-                      : pct < 0.25 ? 'bg-yellow-500/30'
-                      : pct < 0.5  ? 'bg-orange-500/50'
-                      : pct < 0.75 ? 'bg-red-500/70'
-                      : 'bg-red-500';
+                        : pct < 0.25 ? 'bg-yellow-500/30'
+                          : pct < 0.5 ? 'bg-orange-500/50'
+                            : pct < 0.75 ? 'bg-red-500/70'
+                              : 'bg-red-500';
                     const nowSlot = Math.floor(Date.now() / 1000) % 60;
                     const isNow = i === nowSlot;
                     return (
@@ -809,10 +897,131 @@ export default function Dashboard() {
               </div>
             </div>
           )}
+
+          {/* ── ADMIN ANALYTICS TAB ──────────────────────────────────── */}
+          {activeTab === 'admin' && (
+            <div className="flex-1 flex flex-col gap-4 overflow-y-auto pr-1 dashboard-scrollbar min-h-0">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-3 gap-3 shrink-0">
+                <div className="bg-card border border-border rounded-xl p-3.5 flex flex-col gap-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Clock className="w-3.5 h-3.5 text-orange-400" />
+                    <span className="text-[0.65rem] font-semibold uppercase tracking-wider text-muted-foreground">Peak Attack Hour</span>
+                  </div>
+                  <span className="text-2xl font-bold text-orange-400 tabular-nums">
+                    {analytics?.peak_attack_hour != null ? `${String(analytics.peak_attack_hour).padStart(2, '0')}:00` : '--:--'}
+                  </span>
+                  <span className="text-[0.6rem] text-muted-foreground">{analytics?.peak_attack_count ?? 0} attacks in peak hour</span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-3.5 flex flex-col gap-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
+                    <span className="text-[0.65rem] font-semibold uppercase tracking-wider text-muted-foreground">Top Attacking IP</span>
+                  </div>
+                  <span className="text-base font-bold text-red-400 font-mono truncate">
+                    {analytics?.top_attacking_ips?.[0]?.ip ?? 'None yet'}
+                  </span>
+                  <span className="text-[0.6rem] text-muted-foreground">{analytics?.top_attacking_ips?.[0]?.count ?? 0} blocked requests</span>
+                </div>
+                <div className="bg-card border border-border rounded-xl p-3.5 flex flex-col gap-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <MapPin className="w-3.5 h-3.5 text-yellow-400" />
+                    <span className="text-[0.65rem] font-semibold uppercase tracking-wider text-muted-foreground">Most Targeted Route</span>
+                  </div>
+                  <span className="text-base font-bold text-yellow-400 truncate">
+                    {analytics?.top_targeted_routes?.[0]?.route ?? 'None yet'}
+                  </span>
+                  <span className="text-[0.6rem] text-muted-foreground">{analytics?.top_targeted_routes?.[0]?.count ?? 0} bot attacks</span>
+                </div>
+              </div>
+
+              {/* Hourly attack bar chart */}
+              <div className="bg-card border border-border rounded-xl p-3.5 flex flex-col h-52 shrink-0">
+                <span className="text-[0.7rem] font-semibold uppercase tracking-widest text-muted-foreground mb-2">Hourly Attack Distribution (Today)</span>
+                <div className="flex-1 min-h-0">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={(analytics?.hourly_attacks ?? Array(24).fill(0)).map((v, i) => ({ hour: `${i}h`, attacks: v }))} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                      <XAxis dataKey="hour" stroke="#475569" fontSize={8} tickLine={false} axisLine={false} interval={1} />
+                      <YAxis stroke="#475569" fontSize={9} tickLine={false} axisLine={false} allowDecimals={false} />
+                      <Tooltip contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px', fontSize: '0.7rem' }} />
+                      <Bar dataKey="attacks" fill="#ef4444" radius={[3, 3, 0, 0]} opacity={0.8} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
+              {/* Top IPs + Top Routes side by side */}
+              <div className="grid grid-cols-2 gap-4 shrink-0">
+                {/* Top IPs */}
+                <div className="bg-card border border-border rounded-xl flex flex-col overflow-hidden">
+                  <div className="px-3.5 py-2.5 border-b border-border flex items-center gap-2">
+                    <ListOrdered className="w-3.5 h-3.5 text-red-400" />
+                    <span className="text-[0.7rem] font-semibold uppercase tracking-widest text-muted-foreground">Top Attacking IPs</span>
+                  </div>
+                  <div className="p-2 flex flex-col gap-1">
+                    {(analytics?.top_attacking_ips ?? []).length === 0 ? (
+                      <span className="text-[0.65rem] text-muted-foreground/50 p-2">No data yet</span>
+                    ) : (
+                      (analytics?.top_attacking_ips ?? []).map((entry, i) => (
+                        <div key={entry.ip} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-red-500/[0.04] border border-red-500/10">
+                          <span className="text-[0.6rem] text-muted-foreground/50 w-5">#{i + 1}</span>
+                          <span className="flex-1 font-mono text-[0.7rem] text-red-400/90 truncate">{entry.ip}</span>
+                          <span className="text-[0.7rem] font-bold text-red-400 tabular-nums">{entry.count}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+                {/* Top Routes */}
+                <div className="bg-card border border-border rounded-xl flex flex-col overflow-hidden">
+                  <div className="px-3.5 py-2.5 border-b border-border flex items-center gap-2">
+                    <MapPin className="w-3.5 h-3.5 text-yellow-400" />
+                    <span className="text-[0.7rem] font-semibold uppercase tracking-widest text-muted-foreground">Most Targeted Routes</span>
+                  </div>
+                  <div className="p-2 flex flex-col gap-1">
+                    {(analytics?.top_targeted_routes ?? []).length === 0 ? (
+                      <span className="text-[0.65rem] text-muted-foreground/50 p-2">No data yet</span>
+                    ) : (
+                      (analytics?.top_targeted_routes ?? []).map((entry, i) => (
+                        <div key={entry.route} className="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-yellow-500/[0.04] border border-yellow-500/10">
+                          <span className="text-[0.6rem] text-muted-foreground/50 w-5">#{i + 1}</span>
+                          <span className="flex-1 text-[0.7rem] text-yellow-400/90 truncate">{entry.route}</span>
+                          <span className="text-[0.7rem] font-bold text-yellow-400 tabular-nums">{entry.count}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── RIGHT COLUMN ─────────────────────────────────────────────── */}
         <div className="flex-1 flex flex-col p-4 gap-3 overflow-y-auto dashboard-scrollbar bg-background">
+          {/* ── ALERT BANNER ────────────────────────────────────── */}
+          <AnimatePresence>
+            {alert?.alert_active && (
+              <motion.div
+                initial={{ opacity: 0, y: -8, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -8, scale: 0.97 }}
+                className="bg-red-500/10 border border-red-500/40 rounded-xl p-3.5 flex flex-col gap-2 shrink-0"
+              >
+                <div className="flex items-center gap-2">
+                  <Bell className="w-4 h-4 text-red-400 animate-pulse" />
+                  <span className="text-[0.75rem] font-bold text-red-400 uppercase tracking-wider">🚨 Bot Attack Detected</span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[0.65rem] font-mono">
+                  <span className="text-muted-foreground">Requests/sec: <span className="text-red-300 font-bold">{alert.requests_per_sec}</span></span>
+                  <span className="text-muted-foreground">Blocked Bots: <span className="text-red-300 font-bold">{alert.blocked_bots}</span></span>
+                  <span className="text-muted-foreground">Affected Route: <span className="text-red-300 font-bold">{alert.affected_route}</span></span>
+                  <span className="text-muted-foreground">Top IP: <span className="text-red-300 font-bold">{alert.top_ip}</span></span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
           {/* Simulation controls */}
           <div className="bg-card border border-border rounded-xl p-4 flex flex-col gap-3.5 shrink-0">
             <div className="flex items-center justify-between">
@@ -822,21 +1031,19 @@ export default function Dashboard() {
                 </div>
                 <span className="text-[0.75rem] font-semibold text-foreground">Simulation Controls</span>
               </div>
-              <div className={`px-2.5 py-1 rounded-full text-[0.6rem] font-bold flex items-center gap-1.5 uppercase tracking-wider transition-colors ${
-                isRunning
+              <div className={`px-2.5 py-1 rounded-full text-[0.6rem] font-bold flex items-center gap-1.5 uppercase tracking-wider transition-colors ${isRunning
                   ? 'bg-green-500/10 text-green-400 border border-green-500/20'
                   : 'bg-card text-muted-foreground border border-border'
-              }`}>
+                }`}>
                 {isRunning && <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />}
                 {isRunning ? 'Running' : 'Stopped'}
               </div>
             </div>            <button
               onClick={handleToggleSimulation}
-              className={`w-full py-2.5 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all duration-200 ${
-                isRunning 
-                  ? 'bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 hover:border-red-500/50' 
+              className={`w-full py-2.5 rounded-lg text-sm font-bold flex items-center justify-center gap-2 transition-all duration-200 ${isRunning
+                  ? 'bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 hover:border-red-500/50'
                   : 'bg-gradient-to-r from-blue-600 to-blue-500 text-white hover:from-blue-500 hover:to-blue-400 shadow-[0_2px_12px_rgba(59,130,246,0.3)]'
-              }`}
+                }`}
             >
               {isRunning ? <><Square className="w-3.5 h-3.5" fill="currentColor" /> Stop Simulation</> : <><Play className="w-3.5 h-3.5" fill="currentColor" /> Start Simulation</>}
             </button>
@@ -845,10 +1052,10 @@ export default function Dashboard() {
                 <span className="text-muted-foreground">Requests / Second</span>
                 <span className="font-bold text-foreground bg-card border border-border rounded px-2 py-0.5 text-[0.65rem] tabular-nums">{rps} RPS</span>
               </div>
-              <input 
-                type="range" 
-                min="1" max="50" 
-                value={rps} 
+              <input
+                type="range"
+                min="1" max="50"
+                value={rps}
                 onChange={(e) => setRps(Number(e.target.value))}
                 className="w-full accent-primary h-1.5"
                 disabled={isRunning}
@@ -935,11 +1142,10 @@ export default function Dashboard() {
                   honeypotLog.map((entry) => (
                     <div
                       key={entry.id}
-                      className={`flex justify-between items-center px-2 py-1.5 rounded-md transition-colors gap-2 ${
-                        entry.isConfirmed
+                      className={`flex justify-between items-center px-2 py-1.5 rounded-md transition-colors gap-2 ${entry.isConfirmed
                           ? "bg-red-500/10 border border-red-500/20 text-red-400 font-bold"
                           : "hover:bg-yellow-500/[0.03] text-yellow-400/80"
-                      }`}
+                        }`}
                     >
                       <span className="truncate">
                         {entry.isConfirmed ? "🚨 " : "🍯 "}
@@ -952,6 +1158,39 @@ export default function Dashboard() {
                   ))
                 )}
               </div>
+            </div>
+          </div>
+
+          {/* ── FAIR QUEUE PANEL ─────────────────────────────────── */}
+          <div className="flex-1 bg-card border border-border rounded-xl flex flex-col overflow-hidden min-h-[160px]">
+            <div className="px-3 py-2 border-b border-border flex items-center gap-2 shrink-0">
+              <Scale className="w-3 h-3 text-green-400" />
+              <span className="text-[0.65rem] font-semibold uppercase tracking-widest text-muted-foreground">Fair Queue — Genuine Users</span>
+              <span className="ml-auto text-[0.55rem] text-green-400/60 font-mono">{queueEntries.length} in queue</span>
+            </div>
+            {/* Column headers */}
+            <div className="px-3 py-1 border-b border-border/40 flex items-center gap-2 text-[0.58rem] font-semibold uppercase tracking-wider text-muted-foreground/50 shrink-0">
+              <span className="w-8 shrink-0 text-center">Pos</span>
+              <span className="flex-1">User</span>
+              <span className="w-16 text-right">Priority</span>
+              <span className="w-16 text-right">Wait</span>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2 font-mono text-[0.68rem] flex flex-col gap-0.5 dashboard-scrollbar">
+              {queueEntries.length === 0 ? (
+                <div className="flex-1 flex flex-col items-center justify-center gap-1.5 text-muted-foreground/40 py-4">
+                  <Scale className="w-6 h-6" />
+                  <span className="text-[0.65rem]">No users in queue yet</span>
+                </div>
+              ) : (
+                queueEntries.slice(0, 12).map((entry, i) => (
+                  <div key={`${entry.user_id}-${i}`} className="flex items-center gap-2 px-2 py-1 rounded-md bg-green-500/[0.03] border border-green-500/10 hover:bg-green-500/[0.07] transition-colors">
+                    <span className="w-8 shrink-0 text-center text-green-400/50 font-bold text-[0.6rem]">#{entry.queue_position}</span>
+                    <span className="flex-1 text-green-400/80 truncate">{entry.user_id}</span>
+                    <span className="w-16 text-right text-blue-400/70 tabular-nums">{entry.priority_score}</span>
+                    <span className="w-16 text-right text-muted-foreground/60">{entry.estimated_wait}</span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -971,7 +1210,8 @@ export default function Dashboard() {
         </div>
       </footer>
 
-      <style dangerouslySetInnerHTML={{__html: `
+      <style dangerouslySetInnerHTML={{
+        __html: `
         .dashboard-scrollbar::-webkit-scrollbar { width: 5px; }
         .dashboard-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .dashboard-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 9999px; }

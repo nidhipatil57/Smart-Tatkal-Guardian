@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import { useEffect } from "react";
 import { Switch, Route, Router as WouterRouter, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
@@ -32,21 +32,33 @@ function Router() {
   );
 }
 
-/** Listens for cross-origin postMessage from landing.html (port 8001).
+/** Listens for cross-origin postMessage from landing.html.
+ *  On mount, signals 'tatkal_ready' to the parent so landing.html can
+ *  deliver credentials even after a Vite hot-reload (handshake pattern).
  *  When tatkal_auth arrives, writes the email to localStorage and
  *  navigates straight to /dashboard — no second login needed. */
 function AuthBridge() {
   const [, setLocation] = useLocation();
 
   useEffect(() => {
+    // Signal readiness to parent (landing.html) — covers the hot-reload case
+    // where the URL param was already consumed and cleared from the address bar.
+    if (window.parent !== window) {
+      window.parent.postMessage({ type: "tatkal_ready" }, "http://localhost:8000");
+    }
+
     const handler = (event: MessageEvent) => {
-      // Accept messages only from the landing-page origin
-      if (event.origin !== "http://localhost:8001") return;
+      // Accept credentials from the orchestrator landing page or the simulator landing
+      const allowedOrigins = ["http://localhost:8000", "http://localhost:8001"];
+      // tatkal_logout may arrive with '*' targetOrigin — accept from any trusted port
+      const isLogout = event.data?.type === "tatkal_logout";
+      if (!isLogout && !allowedOrigins.includes(event.origin)) return;
+
       if (event.data?.type === "tatkal_auth" && event.data?.email) {
         localStorage.setItem("tatkal_user", event.data.email);
         setLocation("/dashboard");
       }
-      if (event.data?.type === "tatkal_logout") {
+      if (isLogout) {
         localStorage.removeItem("tatkal_user");
         setLocation("/");
       }

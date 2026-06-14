@@ -1101,18 +1101,23 @@ footer{
         <div class="mini-stats">
           <div class="ms-row">
             <span class="ms-icon">🤖</span>
-            <span class="ms-text">Bot requests caught</span>
-            <span class="ms-val r">800 / 1000</span>
+            <span class="ms-text">Bots blocked (live)</span>
+            <span class="ms-val r" id="ls-bots">loading…</span>
           </div>
           <div class="ms-row">
             <span class="ms-icon">✅</span>
-            <span class="ms-text">Genuine success rate</span>
-            <span class="ms-val g">94%</span>
+            <span class="ms-text">Humans passed (live)</span>
+            <span class="ms-val g" id="ls-humans">loading…</span>
           </div>
           <div class="ms-row">
             <span class="ms-icon">🍯</span>
-            <span class="ms-text">Honeypot confirmed bots</span>
-            <span class="ms-val y">47 flagged</span>
+            <span class="ms-text">Honeypot traps fired</span>
+            <span class="ms-val y" id="ls-honey">loading…</span>
+          </div>
+          <div class="ms-row">
+            <span class="ms-icon">🔴</span>
+            <span class="ms-text">Top attacking IP</span>
+            <span class="ms-val r" id="ls-topip" style="font-size:0.7rem;font-family:monospace">loading…</span>
           </div>
         </div>
       </div>
@@ -1257,28 +1262,34 @@ function doLogin(){
   const dash = document.getElementById('dashboard');
   dash.classList.add('active');
   const frame = document.getElementById('dash-frame');
-  
-  // Load dashboard route directly with query string parameter to handle authentication seamlessly
+
+  // Primary auth path: URL query param is parsed synchronously by App.tsx before React mounts
   frame.src = DASH_URL + '/dashboard?email=' + encodeURIComponent(email);
 
-  // Fallback / sync channel via postMessage
-  frame.onload = () => {
-    frame.contentWindow.postMessage(
-      { type: 'tatkal_auth', email },
-      'http://localhost:5173'
-    );
-  };
+  // Fallback: if React app sends 'tatkal_ready' (e.g. hot-reload), reply with credentials
+  // This is a one-shot listener — cleaned up after use
+  function onReady(evt) {
+    if (evt.origin !== DASH_URL) return;
+    if (evt.data?.type === 'tatkal_ready') {
+      frame.contentWindow.postMessage({ type: 'tatkal_auth', email }, DASH_URL);
+      window.removeEventListener('message', onReady);
+    }
+  }
+  window.addEventListener('message', onReady);
 
-  frame.onerror = ()=>{
+  frame.onerror = () => {
+    window.removeEventListener('message', onReady);
     frame.srcdoc=`<html><body style="background:#060910;color:#64748b;font-family:system-ui;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:1rem;"><div style="font-size:2.5rem">🛡️</div><div style="color:#f1f5f9;font-size:1.1rem;font-weight:700">Dashboard server not running</div><div>Start it first:</div><code style="background:#111827;border:1px solid #1e293b;padding:.5rem 1.2rem;border-radius:8px;font-size:.85rem">cd dashboard &amp;&amp; npm run dev</code></body></html>`;
   };
 }
 function doLogout(){
-  // ── Tell the React app to clear its own localStorage
+  // Tell the React app to clear its own localStorage (use '*' — frame may already be blank)
   const frame = document.getElementById('dash-frame');
-  if (frame.contentWindow) {
-    frame.contentWindow.postMessage({ type: 'tatkal_logout' }, 'http://localhost:5173');
-  }
+  try {
+    if (frame.contentWindow) {
+      frame.contentWindow.postMessage({ type: 'tatkal_logout' }, '*');
+    }
+  } catch(e) { /* cross-origin frame already gone */ }
   document.getElementById('dashboard').classList.remove('active');
   frame.src='about:blank';
   document.getElementById('inp-email').value='';
@@ -1291,6 +1302,38 @@ document.addEventListener('keydown',e=>{
     hideLogin();
   }
 });
+
+// ── Live stats polling for the login panel ──────────────────────────────────
+async function refreshLoginStats(){
+  try {
+    const [statsRes, analyticsRes] = await Promise.all([
+      fetch('http://localhost:8000/stats'),
+      fetch('http://localhost:8000/analytics'),
+    ]);
+    if(statsRes.ok){
+      const s = await statsRes.json();
+      const bots = (s.blocked||0) + (s.honey||0);
+      const total = s.total || 0;
+      document.getElementById('ls-bots').textContent   = total > 0 ? `${bots} / ${total}` : '—';
+      document.getElementById('ls-humans').textContent = s.passed || s.allowed || 0;
+      document.getElementById('ls-honey').textContent  = `${s.honey||0} traps`;
+    }
+    if(analyticsRes.ok){
+      const a = await analyticsRes.json();
+      const topIp = a.top_attacking_ips?.[0]?.ip;
+      document.getElementById('ls-topip').textContent = topIp || 'None yet';
+    }
+  } catch {
+    // orchestrator offline — show dashes
+    ['ls-bots','ls-humans','ls-honey','ls-topip'].forEach(id=>{
+      const el = document.getElementById(id);
+      if(el && el.textContent === 'loading…') el.textContent = 'offline';
+    });
+  }
+}
+refreshLoginStats();
+setInterval(refreshLoginStats, 3000);
+
 </script>
 </body>
 </html>

@@ -1,12 +1,11 @@
 import asyncio
+import json
 import os
 import random
 from collections import deque
 from contextlib import asynccontextmanager
 
-# pyrefly: ignore [missing-import]
-from fastapi import FastAPI
-# pyrefly: ignore [missing-import]
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -45,6 +44,23 @@ human_count: int = 0
 request_log: deque = deque(maxlen=100)   # includes is_bot — internal only
 _bg_task: asyncio.Task | None = None
 
+# ── WebSocket clients ────────────────────────────────────────────────────────
+_ws_clients: set[WebSocket] = set()
+
+
+async def _broadcast(data: dict) -> None:
+    """Send a JSON event to all connected dashboard WebSocket clients."""
+    if not _ws_clients:
+        return
+    msg = json.dumps(data)
+    dead = set()
+    for ws in _ws_clients:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.add(ws)
+    _ws_clients.difference_update(dead)
+
 
 # ── Background generator ─────────────────────────────────────────────────────
 async def _generate_traffic(rps: int):
@@ -63,7 +79,19 @@ async def _generate_traffic(rps: int):
 
         sent_count += 1
         request_log.append(profile)          # full profile with is_bot
-        await send_request(profile)          # sender strips is_bot before POST
+        result = await send_request(profile) # returns scorer response dict or None
+
+        # Broadcast to dashboard WebSocket clients
+        if result and isinstance(result, dict):
+            await _broadcast({
+                "type": "event",
+                "user_id": result.get("user_id", profile.get("user_id")),
+                "action": result.get("action", "UNKNOWN"),
+                "bot_probability": result.get("bot_probability", 0),
+                "flags": result.get("flags", []),
+                "risk_level": result.get("risk_level", ""),
+                "time": result.get("timestamp", 0) * 1000,  # ms for JS
+            })
 
         await asyncio.sleep(delay)
 
@@ -116,3 +144,19 @@ async def get_status():
 async def replay():
     """Returns last 100 requests including is_bot field (internal use only)."""
     return list(request_log)
+
+
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+@app.websocket("/ws/events")
+async def ws_events(websocket: WebSocket):
+    """Dashboard connects here to receive real-time scoring events."""
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    try:
+        while True:
+            # Keep connection alive; client doesn't need to send anything
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _ws_clients.discard(websocket)
